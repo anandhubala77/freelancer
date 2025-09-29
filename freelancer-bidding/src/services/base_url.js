@@ -1,6 +1,6 @@
-export const base_url="http://localhost:5000"
+// export const base_url="http://localhost:5000"
 
-// export const base_url = "https://freelancerback.onrender.com";  
+ export const base_url = "https://freelancer-q5ka.onrender.com";  
 
 // https://freelancerback.onrender.comit 
 
