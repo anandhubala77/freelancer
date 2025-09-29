@@ -1,0 +1,6 @@
+@import "tailwindcss";
+
+/* Enable smooth scrolling across the entire app */
+html {
+  scroll-behavior: smooth;
+}

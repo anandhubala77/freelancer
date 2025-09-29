@@ -1,0 +1,520 @@
+const Project = require("../models/projectSchema");
+const User = require("../models/userSchema");
+const razorpay = require("../utils/razorpay");
+const Quotation = require("../models/quotationSchema");
+const Payment = require("../models/paymentSchema");
+const Notification = require("../models/notificationSchema");
+;
+
+
+
+// GET /admin/projects
+exports.getAllProjects = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const skip = (page - 1) * limit;
+
+    const { q = "", sortBy = "createdAt", sortOrder = "desc" } = req.query;
+
+    // Build filter
+    const filter = {};
+    if (q) {
+      const or = [];
+      // Title search (case-insensitive)
+      or.push({ title: { $regex: q, $options: "i" } });
+      // ID search if valid ObjectId
+      try {
+        const mongoose = require("mongoose");
+        if (mongoose.Types.ObjectId.isValid(q)) {
+          or.push({ _id: q });
+        }
+      } catch (_) {}
+      filter.$or = or;
+    }
+
+    // Sorting
+    const sort = {};
+    const allowedSortFields = new Set(["createdAt", "title", "budget"]);
+    const field = allowedSortFields.has(sortBy) ? sortBy : "createdAt";
+    const order = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
+    sort[field] = order;
+
+    const total = await Project.countDocuments(filter);
+    const projects = await Project.find(filter)
+      .populate("userId", "name lastName")
+      .populate("reports.reportedBy", "name")
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    res.json({ items: projects, total, currentPage: page, totalPages: Math.ceil(total / limit) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to fetch projects" });
+  }
+};
+
+// DELETE /admin/projects/:id
+exports.deleteProject = async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log("Trying to delete project:", id);
+    await Project.findByIdAndDelete(id);
+    res.json({ message: "Project deleted" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Failed to delete project" });
+  }
+};
+
+// controllers/adminController.js - paginated users
+exports.getAllUsers = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const skip = (page - 1) * limit;
+
+    const { q = "", sortBy = "createdAt", sortOrder = "desc" } = req.query;
+
+    // Base filter: exclude admins
+    const filter = { role: { $ne: "admin" } };
+    if (q) {
+      const or = [];
+      // Email search
+      or.push({ email: { $regex: q, $options: "i" } });
+      // Name and lastName search
+      or.push({ name: { $regex: q, $options: "i" } });
+      or.push({ lastName: { $regex: q, $options: "i" } });
+      // ID search if valid ObjectId
+      try {
+        const mongoose = require("mongoose");
+        if (mongoose.Types.ObjectId.isValid(q)) {
+          or.push({ _id: q });
+        }
+      } catch (_) {}
+      filter.$or = or;
+    }
+
+    // Sorting
+    const sort = {};
+    const allowedSortFields = new Set(["createdAt", "name", "email"]);
+    const field = allowedSortFields.has(sortBy) ? sortBy : "createdAt";
+    const order = String(sortOrder).toLowerCase() === "asc" ? 1 : -1;
+    sort[field] = order;
+
+    const total = await User.countDocuments(filter);
+    const users = await User.find(filter)
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean();
+    res.json({ items: users, total, currentPage: page, totalPages: Math.ceil(total / limit) });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to fetch users" });
+  }
+};
+
+// controllers/adminController.js
+exports.deleteUser = async (req, res) => {
+  try {
+    await User.findByIdAndDelete(req.params.id);
+    res.json({ message: "User deleted successfully" });
+  } catch (err) {
+    res.status(500).json({ message: "Failed to delete user" });
+  }
+};
+
+// GET all project reports and user reports for admin
+// exports.getFraudReports = async (req, res) => {
+//   try {
+//     // --- 1. Fetch Project Reports ---
+//     const projectsWithReports = await Project.find({
+//       "reports.0": { $exists: true },
+//     }).select("_id reports");
+
+//     const projectReports = projectsWithReports.flatMap((project) =>
+//       project.reports.map((report) => ({
+//         reportId: report._id,
+//         projectId: project._id,
+//         reportedBy: report.reportedBy,
+//         reason: report.reason,
+//         createdAt: report.createdAt,
+//         type: "Project", // 👈 Add this for frontend filtering
+//       }))
+//     );
+
+//     // --- 2. Fetch Jobseeker Reports ---
+//     const usersWithReports = await User.find({
+//       role: "jobseeker",
+//       "reportedBy.0": { $exists: true },
+//     }).select("_id reportedBy");
+
+//     const userReports = usersWithReports.flatMap((user) =>
+//       user.reportedBy.map((report) => ({
+//         reportId: report._id, // ✅ Include this for delete endpoint
+//         jobseekerId: user._id,
+//         reportedBy: report.reporterId,
+//         reason: report.reason,
+//         createdAt: report.reportedAt,
+//         type: "Job Seeker", // 👈 Add this for frontend filtering
+//       }))
+//     );
+
+//     return res.status(200).json({ projectReports, userReports });
+//   } catch (error) {
+//     console.error("Error fetching fraud reports:", error);
+//     res.status(500).json({ message: "Server Error", error });
+//   }
+// };
+
+// GET all project reports and user reports for admin (paginated on combined list)
+exports.getFraudReports = async (req, res) => {
+  try {
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit) || 10, 1), 100);
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const { respondedOnly = "false", from = "", to = "" } = req.query;
+    const wantResponded = String(respondedOnly).toLowerCase() === "true";
+    const fromDate = from ? new Date(from) : null;
+    const toDate = to ? new Date(to) : null;
+    // --- 1. Fetch Project Reports ---
+    const projectsWithReports = await Project.find({
+      "reports.0": { $exists: true },
+    })
+      .select("_id title userId reports")
+      .populate("userId", "name email")
+      .populate("reports.reportedBy", "name email");
+
+    const projectReports = projectsWithReports.flatMap((project) =>
+      project.reports.map((report) => ({
+        // IDs and normalized type
+        reportId: report._id,
+        type: "project",
+        fraudProjectId: project._id,
+        reportedByUserId: report.reportedBy?._id,
+        // Metadata
+        projectTitle: project.title,
+        projectOwnerName: project.userId?.name,
+        projectOwnerEmail: project.userId?.email,
+        reportedByName: report.reportedBy?.name,
+        reportedByEmail: report.reportedBy?.email,
+        reason: report.reason,
+        createdAt: report.createdAt,
+        responseMessage: report.responseMessage || null,
+        responseAt: report.responseAt || null,
+        hasResponded: !!report.responseMessage,
+      }))
+    );
+
+    // --- 2. Fetch Jobseeker Reports ---
+    const usersWithReports = await User.find({
+      role: "jobseeker",
+      "reportedBy.0": { $exists: true },
+    })
+      .select("_id name email reportedBy")
+      .populate("reportedBy.reporterId", "name email");
+
+    const userReports = usersWithReports.flatMap((user) =>
+      user.reportedBy.map((report) => ({
+        // IDs and normalized type
+        reportId: report._id,
+        type: "user",
+        reportedUserId: user._id,
+        reportedByUserId: report.reporterId?._id,
+        // Metadata
+        reportedUserName: user.name,
+        reportedUserEmail: user.email,
+        reportedByName: report.reporterId?.name,
+        reportedByEmail: report.reporterId?.email,
+        reason: report.reason,
+        createdAt: report.reportedAt,
+        responseMessage: report.responseMessage || null,
+        responseAt: report.responseAt || null,
+        hasResponded: !!report.responseMessage,
+      }))
+    );
+
+    let combined = [...projectReports, ...userReports];
+    // Filter responded only if requested
+    if (wantResponded) {
+      combined = combined.filter((r) => r.hasResponded && r.responseAt);
+    }
+    // Apply date range: if respondedOnly, filter by responseAt; else by createdAt
+    if (fromDate || toDate) {
+      combined = combined.filter((r) => {
+        const date = wantResponded ? (r.responseAt ? new Date(r.responseAt) : null) : (r.createdAt ? new Date(r.createdAt) : null);
+        if (!date) return false;
+        if (fromDate && date < fromDate) return false;
+        if (toDate) {
+          // include entire 'to' day
+          const toCmp = new Date(toDate);
+          toCmp.setHours(23, 59, 59, 999);
+          return date <= toCmp;
+        }
+        return true;
+      });
+    }
+
+    // Default sort: by createdAt desc; when respondedOnly, keep sorting by createdAt unless needed otherwise
+    combined.sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+    const total = combined.length;
+    const pageItems = combined.slice(start, end);
+
+    return res.status(200).json({ items: pageItems, total, currentPage: page, totalPages: Math.ceil(total / limit) });
+  } catch (error) {
+    console.error("Error fetching fraud reports:", error);
+    res.status(500).json({ message: "Server Error", error });
+  }
+};
+
+
+exports.deleteFraudReport = async (req, res) => {
+  const { type, reportedOnId, reportId } = req.params;
+
+  try {
+    if (type === "project") {
+      await Project.updateOne(
+        { _id: reportedOnId },
+        { $pull: { reports: { _id: reportId } } }
+      );
+    } else if (type === "users") {
+      await User.updateOne(
+        { _id: reportedOnId },
+        { $pull: { reportedBy: { _id: reportId } } }
+      );
+    } else {
+      return res.status(400).json({ message: "Invalid report type" });
+    }
+
+    res.status(200).json({ message: "Fraud report deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting fraud report:", error);
+    res.status(500).json({ message: "Failed to delete fraud report" });
+  }
+};
+
+exports.uploadProfileImage = async (req, res) => {
+  try {
+    const userId = req.userId;
+    const imagePath = req.file.path;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { profile: imagePath },
+      { new: true }
+    ).select("-password");
+
+    res.status(200).json({
+      message: "Profile updated successfully!",
+      user_data: user,
+    });
+  } catch (err) {
+    console.error("Profile upload error:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+};
+
+// GET /admin/stats
+exports.getAdminStats = async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments({ role: { $ne: "admin" } }); // ✅ excludes admins
+    const jobSeekers = await User.countDocuments({ role: "jobseeker" });
+    const hiringPersons = await User.countDocuments({ role: "hiringperson" });
+
+    const totalProjects = await Project.countDocuments();
+
+    const reportedProjects = await Project.countDocuments({
+      "reports.0": { $exists: true },
+    });
+    const reportedUsers = await User.countDocuments({
+      "reportedBy.0": { $exists: true },
+    });
+
+    const fraudReports = reportedProjects + reportedUsers;
+
+    return res.status(200).json({
+      totalUsers,
+      totalProjects,
+      fraudReports,
+      jobSeekers,
+      hiringPersons,
+    });
+  } catch (err) {
+    console.error("Error fetching admin stats:", err);
+    res.status(500).json({ message: "Failed to fetch admin statistics." });
+  }
+};
+
+// GET /admin/dashboard-metrics
+exports.getAdminDashboardMetrics = async (req, res) => {
+  try {
+    const totalUsers = await User.countDocuments();
+    const totalProjects = await Project.countDocuments();
+    const jobSeekers = await User.countDocuments({ role: "jobseeker" });
+    const hiringPersons = await User.countDocuments({ role: "hiring" });
+
+    const fraudReports = await Project.aggregate([
+      { $match: { reports: { $exists: true, $not: { $size: 0 } } } },
+      { $count: "count" },
+    ]);
+
+    const recentProjects = await Project.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .select("title budget status");
+
+    const recentUsers = await User.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .select("name lastName role");
+
+    const recentBids = await Quotation.find()
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate("userId", "name email")
+      .populate("jobId", "title");
+
+    const recentPayments = await Payment.find()
+      .sort({ paidAt: -1 })
+      .limit(5)
+      .populate("paidBy", "name email")
+      .populate("paidTo", "name email")
+      .populate("jobId", "title");
+
+    // Monthly Payments Aggregation
+    const monthlyPayments = await Payment.aggregate([
+      {
+        $group: {
+          _id: { $month: "$paidAt" },
+          amount: { $sum: "$amount" },
+        },
+      },
+      {
+        $project: {
+          month: {
+            $arrayElemAt: [
+              [
+                "Jan",
+                "Feb",
+                "Mar",
+                "Apr",
+                "May",
+                "Jun",
+                "Jul",
+                "Aug",
+                "Sep",
+                "Oct",
+                "Nov",
+                "Dec",
+              ],
+              { $subtract: ["$_id", 1] },
+            ],
+          },
+          amount: 1,
+          _id: 0,
+        },
+      },
+      { $sort: { month: 1 } },
+    ]);
+
+    // Yearly Payments Aggregation
+    const yearlyPayments = await Payment.aggregate([
+      {
+        $group: {
+          _id: { $year: "$paidAt" },
+          amount: { $sum: "$amount" },
+        },
+      },
+      {
+        $project: {
+          year: "$_id",
+          amount: 1,
+          _id: 0,
+        },
+      },
+      { $sort: { year: 1 } },
+    ]);
+
+    res.status(200).json({
+      totalUsers,
+      totalProjects,
+      jobSeekers,
+      hiringPersons,
+      fraudReports: fraudReports[0]?.count || 0,
+      recentProjects,
+      recentUsers,
+      recentBids,
+      recentPayments,
+      monthlyPayments,
+      yearlyPayments,
+    });
+  } catch (error) {
+    console.error("Dashboard metrics error:", error);
+    res.status(500).json({ message: "Failed to fetch dashboard metrics" });
+  }
+};
+
+// controller
+exports.getPaymentById = async (req, res) => {
+  try {
+    const payment = await Payment.findById(req.params.id)
+      .populate("jobId", "title")
+      .populate("paidBy", "name email")
+      .populate("paidTo", "name email");
+    if (!payment) return res.status(404).json({ message: "Not found" });
+    res.json(payment);
+  } catch (err) {
+    res.status(500).json({ message: "Error fetching payment", error: err });
+  }
+};
+// adminController.js
+exports.sendReportResponse = async (req, res) => {
+  try {
+    const { reportType, reportId, responseMessage } = req.body;
+
+    if (reportType === "project") {
+      const project = await Project.findOne({ "reports._id": reportId });
+      if (!project) return res.status(404).json({ message: "Project report not found" });
+
+      const report = project.reports.id(reportId);
+      report.responseMessage = responseMessage;
+      report.responseAt = new Date();
+      await project.save();
+
+      // ✅ Send notification to jobseeker (report.reportedBy)
+      await Notification.create({
+        userId: report.reportedBy,
+        message: `Admin responded to your report on a project: "${responseMessage}"`,
+      });
+
+    } else if (reportType === "user") {
+      const user = await User.findOne({ "reportedBy._id": reportId });
+      if (!user) return res.status(404).json({ message: "User report not found" });
+
+      const report = user.reportedBy.id(reportId);
+      report.responseMessage = responseMessage;
+      report.responseAt = new Date();
+      await user.save();
+
+      // ✅ Send notification to hiring person (report.reporterId)
+      await Notification.create({
+        userId: report.reporterId,
+        message: `Admin responded to your report on a job seeker: "${responseMessage}"`,
+      });
+    } else {
+      return res.status(400).json({ message: "Invalid report type" });
+    }
+
+    res.status(200).json({ message: "Response sent and notification delivered." });
+  } catch (error) {
+    console.error("Error in sendReportResponse:", error);
+    res.status(500).json({ message: "Failed to send response", error });
+  }
+};
+
+
+
+
